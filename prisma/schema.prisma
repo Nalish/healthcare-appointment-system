@@ -1,0 +1,136 @@
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  PATIENT
+  DOCTOR
+  ADMIN
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum NotificationType {
+  APPOINTMENT_BOOKED
+  APPOINTMENT_CONFIRMED
+  APPOINTMENT_CANCELLED
+  APPOINTMENT_RESCHEDULED
+  APPOINTMENT_REMINDER
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  fullName     String
+  email        String   @unique
+  passwordHash String
+  phone        String?
+  role         UserRole @default(PATIENT)
+  isActive     Boolean  @default(true)
+
+  doctorProfile Doctor?
+  appointments  Appointment[] @relation("PatientAppointments")
+  notifications Notification[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([role])
+}
+
+model Department {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+
+  doctors   Doctor[]
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model Doctor {
+  id                        String  @id @default(uuid()) @db.Uuid
+  userId                    String  @unique @db.Uuid
+  departmentId              String  @db.Uuid
+  licenseNumber             String? @unique
+  bio                       String?
+  consultationDurationMinutes Int    @default(30)
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+
+  availability Availability[]
+  appointments Appointment[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([departmentId])
+}
+
+model Availability {
+  id        String  @id @default(uuid()) @db.Uuid
+  doctorId  String  @db.Uuid
+  dayOfWeek Int
+  startMinute Int
+  endMinute   Int
+  isActive  Boolean @default(true)
+
+  doctor Doctor @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([doctorId, dayOfWeek])
+}
+
+model Appointment {
+  id        String            @id @default(uuid()) @db.Uuid
+  patientId String            @db.Uuid
+  doctorId  String            @db.Uuid
+  startTime DateTime          @db.Timestamptz(3)
+  endTime   DateTime          @db.Timestamptz(3)
+  status    AppointmentStatus @default(PENDING)
+  reason    String?
+
+  patient User   @relation("PatientAppointments", fields: [patientId], references: [id], onDelete: Restrict)
+  doctor  Doctor @relation(fields: [doctorId], references: [id], onDelete: Restrict)
+
+  notifications Notification[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([patientId, startTime])
+  @@index([doctorId, startTime])
+  @@index([status, startTime])
+}
+
+model Notification {
+  id            String           @id @default(uuid()) @db.Uuid
+  userId        String           @db.Uuid
+  appointmentId String?          @db.Uuid
+  type          NotificationType
+  title         String
+  message       String
+  readAt        DateTime?        @db.Timestamptz(3)
+  sentAt        DateTime?        @db.Timestamptz(3)
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appointment Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([userId, createdAt])
+  @@index([appointmentId])
+}
