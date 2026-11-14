@@ -1,11 +1,43 @@
-
 import { NextRequest, NextResponse } from "next/server";
 import  prisma  from "@/lib/prisma";
 import { AppointmentStatus } from "@/generated/prisma/enums";
 import { requireRole } from "@/lib/authorization";
 import { UserRole } from "@/generated/prisma/client";
 
-// GET: Retrieve one appointment
+function getNairobiTimeParts(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Africa/Nairobi",
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+
+  const getPart = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+
+  const weekdays: Record<string, number> = {
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+    Sun: 7,
+  };
+
+  const hour = Number(getPart("hour"));
+  const minute = Number(getPart("minute"));
+
+  return {
+    dayOfWeek: weekdays[getPart("weekday")],
+    minuteOfDay: hour * 60 + minute,
+    dateKey: `${getPart("year")}-${getPart("month")}-${getPart("day")}`,
+  };
+}
 
 // GET: Retrieve one appointment with ownership authorization
 export async function GET(
@@ -79,12 +111,13 @@ export async function GET(
   }
 }
  // PATCH: Update an appointment with role-based authorization
+// PATCH: Update an appointment with role-based authorization
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    // Step 1: Authenticate the user
+    // Step 1: Authenticate and authorize the user
     const { user, response } = await requireRole([
       UserRole.PATIENT,
       UserRole.DOCTOR,
@@ -96,11 +129,24 @@ export async function PATCH(
     }
 
     const { id } = await params;
-    const body = await request.json();
 
-    const { startTime, status, reason } = body;
+    // Step 2: Validate request body
+    const body: unknown = await request.json();
 
-    // Step 2: Verify doctor profile
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return NextResponse.json(
+        { message: "Invalid request body." },
+        { status: 400 }
+      );
+    }
+
+    const { startTime, status, reason } = body as {
+      startTime?: unknown;
+      status?: unknown;
+      reason?: unknown;
+    };
+
+    // Step 3: Verify doctor profile
     if (user.role === UserRole.DOCTOR && !user.doctorProfile) {
       return NextResponse.json(
         { message: "Doctor profile not found." },
@@ -108,7 +154,7 @@ export async function PATCH(
       );
     }
 
-    // Step 3: Retrieve appointment with ownership conditions
+    // Step 4: Retrieve appointment with ownership conditions
     const where =
       user.role === UserRole.PATIENT
         ? { id, patientId: user.id }
@@ -134,10 +180,10 @@ export async function PATCH(
       );
     }
 
-    // Step 4: Prevent updates to final appointments
+    // Step 5: Prevent updates to final appointments
     if (
-      existingAppointment.status === "COMPLETED" ||
-      existingAppointment.status === "CANCELLED"
+      existingAppointment.status === AppointmentStatus.COMPLETED ||
+      existingAppointment.status === AppointmentStatus.CANCELLED
     ) {
       return NextResponse.json(
         { message: "This appointment can no longer be updated." },
@@ -145,10 +191,13 @@ export async function PATCH(
       );
     }
 
-    // Step 5: Validate requested status
+    // Step 6: Validate requested status
     if (
       status !== undefined &&
-      !Object.values(AppointmentStatus).includes(status)
+      (typeof status !== "string" ||
+        !Object.values(AppointmentStatus).includes(
+          status as AppointmentStatus
+        ))
     ) {
       return NextResponse.json(
         { message: "Invalid appointment status." },
@@ -156,28 +205,52 @@ export async function PATCH(
       );
     }
 
-    // Step 6: Enforce role-specific permissions
-    if (status !== undefined) {
+    const requestedStatus = status as AppointmentStatus | undefined;
+
+    // Step 7: Validate reason
+    if (
+      reason !== undefined &&
+      reason !== null &&
+      typeof reason !== "string"
+    ) {
+      return NextResponse.json(
+        { message: "Reason must be a string or null." },
+        { status: 400 }
+      );
+    }
+
+    if (typeof reason === "string" && reason.length > 1000) {
+      return NextResponse.json(
+        { message: "Reason cannot exceed 1000 characters." },
+        { status: 400 }
+      );
+    }
+
+    // Step 8: Enforce role-specific status permissions
+    if (requestedStatus !== undefined) {
       const allowedStatuses: Record<string, string[]> = {
         PATIENT: ["CANCELLED"],
         DOCTOR: ["CONFIRMED", "CANCELLED", "COMPLETED"],
         ADMIN: ["CONFIRMED", "CANCELLED", "COMPLETED"],
       };
 
-      if (!allowedStatuses[user.role].includes(status)) {
+      if (!allowedStatuses[user.role].includes(requestedStatus)) {
         return NextResponse.json(
           { message: "You are not permitted to perform this status change." },
           { status: 403 }
         );
       }
 
-      // Enforce valid status transitions
       const validTransitions: Record<string, string[]> = {
         PENDING: ["CONFIRMED", "CANCELLED"],
         CONFIRMED: ["CANCELLED", "COMPLETED"],
       };
 
-      if (!validTransitions[existingAppointment.status].includes(status)) {
+      if (
+        !validTransitions[existingAppointment.status].includes(
+          requestedStatus
+        )
+      ) {
         return NextResponse.json(
           { message: "This status transition is not allowed." },
           { status: 400 }
@@ -185,34 +258,48 @@ export async function PATCH(
       }
     }
 
-    // Step 7: Determine new start time
+    // Step 9: Determine new appointment start time
     let start = existingAppointment.startTime;
 
     if (startTime !== undefined) {
-      if (
-        user.role === UserRole.DOCTOR ||
-        user.role === UserRole.ADMIN ||
-        user.role === UserRole.PATIENT
-      ) {
-        start = new Date(startTime);
+      if (typeof startTime !== "string" || startTime.trim() === "") {
+        return NextResponse.json(
+          { message: "startTime must be a valid date string." },
+          { status: 400 }
+        );
+      }
 
-        if (Number.isNaN(start.getTime())) {
-          return NextResponse.json(
-            { message: "Please provide a valid startTime." },
-            { status: 400 }
-          );
-        }
+      start = new Date(startTime);
 
-        if (start <= new Date()) {
-          return NextResponse.json(
-            { message: "The appointment must be scheduled in the future." },
-            { status: 400 }
-          );
-        }
+      if (Number.isNaN(start.getTime())) {
+        return NextResponse.json(
+          { message: "Please provide a valid startTime." },
+          { status: 400 }
+        );
+      }
+
+      if (start <= new Date()) {
+        return NextResponse.json(
+          { message: "The appointment must be scheduled in the future." },
+          { status: 400 }
+        );
       }
     }
 
-    // Step 8: Calculate appointment end time
+    // Restrict rescheduling and reason updates to administrators
+if (
+  user.role !== UserRole.ADMIN &&
+  (startTime !== undefined || reason !== undefined)
+) {
+  return NextResponse.json(
+    {
+      message: "Only administrators can reschedule appointments or edit their reason.",
+    },
+    { status: 403 }
+  );
+}
+
+    // Step 10: Calculate appointment end time
     const end =
       startTime !== undefined
         ? new Date(
@@ -223,28 +310,72 @@ export async function PATCH(
           )
         : existingAppointment.endTime;
 
-    // Step 9: Check appointment conflicts when rescheduling
+    // Step 11: Check doctor availability when rescheduling
     if (startTime !== undefined) {
-      const conflict = await prisma.appointment.findFirst({
+      const startParts = getNairobiTimeParts(start);
+      const endParts = getNairobiTimeParts(end);
+
+      if (startParts.dateKey !== endParts.dateKey) {
+        return NextResponse.json(
+          {
+            message: "The appointment must fit within one availability period.",
+          },
+          { status: 400 }
+        );
+      }
+
+      const availableSlot = await prisma.availability.findFirst({
         where: {
-          id: { not: id },
           doctorId: existingAppointment.doctorId,
-          status: { not: "CANCELLED" },
-          startTime: { lt: end },
-          endTime: { gt: start },
+          dayOfWeek: startParts.dayOfWeek,
+          isActive: true,
+          startMinute: {
+            lte: startParts.minuteOfDay,
+          },
+          endMinute: {
+            gte: endParts.minuteOfDay,
+          },
         },
-        select: { id: true },
       });
 
-      if (conflict) {
+      if (!availableSlot) {
         return NextResponse.json(
-          { message: "The doctor already has an appointment during that time." },
+          {
+            message: "The doctor is not available during the requested time.",
+          },
           { status: 409 }
         );
       }
     }
 
-    // Step 10: Update only explicitly permitted fields
+    // Step 12: Check for overlapping appointments
+    if (startTime !== undefined) {
+      const conflict = await prisma.appointment.findFirst({
+        where: {
+          id: { not: id },
+          doctorId: existingAppointment.doctorId,
+          status: {
+            not: AppointmentStatus.CANCELLED,
+          },
+          startTime: { lt: end },
+          endTime: { gt: start },
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      if (conflict) {
+        return NextResponse.json(
+          {
+            message: "The doctor already has an appointment during that time.",
+          },
+          { status: 409 }
+        );
+      }
+    }
+
+    // Step 13: Update appointment
     const updatedAppointment = await prisma.appointment.update({
       where: { id },
       data: {
@@ -252,8 +383,12 @@ export async function PATCH(
           startTime: start,
           endTime: end,
         }),
-        ...(status !== undefined && { status }),
-        ...(reason !== undefined && { reason }),
+        ...(requestedStatus !== undefined && {
+          status: requestedStatus,
+        }),
+        ...(reason !== undefined && {
+          reason: reason as string | null,
+        }),
       },
     });
 

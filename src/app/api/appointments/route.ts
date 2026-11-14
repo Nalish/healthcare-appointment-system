@@ -2,9 +2,45 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma  from "@/lib/prisma";
 import { requireRole } from "@/lib/authorization";
-import { UserRole } from "@/generated/prisma/client";
+import { UserRole ,AppointmentStatus} from "@/generated/prisma/client";
 
-// GET: Retrieve all appointments
+
+function getNairobiTimeParts(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Africa/Nairobi",
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+
+  const getPart = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+
+  const weekdays: Record<string, number> = {
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+    Sun: 7,
+  };
+
+  const weekday = getPart("weekday");
+  const hour = Number(getPart("hour"));
+  const minute = Number(getPart("minute"));
+
+  return {
+    dayOfWeek: weekdays[weekday],
+    minuteOfDay: hour * 60 + minute,
+    dateKey: `${getPart("year")}-${getPart("month")}-${getPart("day")}`,
+  };
+}
+
 
 // GET: Retrieve appointments according to the user's role
 export async function GET() {
@@ -170,27 +206,69 @@ export async function POST(request: NextRequest) {
     const end = new Date(
       start.getTime() + doctor.consultationDurationMinutes * 60 * 1000
     );
+    // Step 9: Check the doctor's availability schedule
+
+const startParts = getNairobiTimeParts(start);
+const endParts = getNairobiTimeParts(end);
+
+// Ensure the appointment does not cross into another day
+if (startParts.dateKey !== endParts.dateKey) {
+  return NextResponse.json(
+    {
+      message: "The appointment must fit within one availability period.",
+    },
+    { status: 400 }
+  );
+}
+
+// Find an active availability period that contains the appointment
+const availableSlot = await prisma.availability.findFirst({
+  where: {
+    doctorId: doctor.id,
+    dayOfWeek: startParts.dayOfWeek,
+    isActive: true,
+    startMinute: {
+      lte: startParts.minuteOfDay,
+    },
+    endMinute: {
+      gte: endParts.minuteOfDay,
+    },
+  },
+});
+
+if (!availableSlot) {
+  return NextResponse.json(
+    {
+      message: "The doctor is not available during the requested time.",
+    },
+    { status: 409 }
+  );
+}
 
     // Step 9: Check for overlapping appointments
-    const conflictingAppointment = await prisma.appointment.findFirst({
-      where: {
-        doctorId: doctor.id,
-        startTime: { lt: end },
-        endTime: { gt: start },
-      },
-      select: {
-        id: true,
-      },
-    });
+// Step 10: Check for overlapping active appointments
+const conflictingAppointment = await prisma.appointment.findFirst({
+  where: {
+    doctorId: doctor.id,
+    status: {
+      not: AppointmentStatus.CANCELLED,
+    },
+    startTime: { lt: end },
+    endTime: { gt: start },
+  },
+  select: {
+    id: true,
+  },
+});
 
-    if (conflictingAppointment) {
-      return NextResponse.json(
-        {
-          message: "The doctor already has an appointment during that time.",
-        },
-        { status: 409 }
-      );
-    }
+if (conflictingAppointment) {
+  return NextResponse.json(
+    {
+      message: "The doctor already has an appointment during that time.",
+    },
+    { status: 409 }
+  );
+}
 
     // Step 10: Create appointment
     const appointment = await prisma.appointment.create({
