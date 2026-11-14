@@ -2,17 +2,49 @@
 import { NextRequest, NextResponse } from "next/server";
 import  prisma  from "@/lib/prisma";
 import { AppointmentStatus } from "@/generated/prisma/enums";
+import { requireRole } from "@/lib/authorization";
+import { UserRole } from "@/generated/prisma/client";
 
 // GET: Retrieve one appointment
+
+// GET: Retrieve one appointment with ownership authorization
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    // Step 1: Authenticate and authorize the user
+    const { user, response } = await requireRole([
+      UserRole.PATIENT,
+      UserRole.DOCTOR,
+      UserRole.ADMIN,
+    ]);
+
+    if (response) {
+      return response;
+    }
+
     const { id } = await params;
 
-    const appointment = await prisma.appointment.findUnique({
-      where: { id },
+    // Step 2: Check whether the doctor has a profile
+    if (user.role === UserRole.DOCTOR && !user.doctorProfile) {
+      return NextResponse.json(
+        { message: "Doctor profile not found." },
+        { status: 404 }
+      );
+    }
+
+    // Step 3: Construct ownership conditions
+    const where =
+      user.role === UserRole.PATIENT
+        ? { id, patientId: user.id }
+        : user.role === UserRole.DOCTOR
+          ? { id, doctorId: user.doctorProfile!.id }
+          : { id };
+
+    // Step 4: Retrieve the authorized appointment
+    const appointment = await prisma.appointment.findFirst({
+      where,
       include: {
         patient: {
           select: {
@@ -36,6 +68,7 @@ export async function GET(
     }
 
     return NextResponse.json(appointment, { status: 200 });
+
   } catch (error) {
     console.error("Error fetching appointment:", error);
 
@@ -45,20 +78,46 @@ export async function GET(
     );
   }
 }
-
-// PATCH: Update an appointment
+ // PATCH: Update an appointment with role-based authorization
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    // Step 1: Authenticate the user
+    const { user, response } = await requireRole([
+      UserRole.PATIENT,
+      UserRole.DOCTOR,
+      UserRole.ADMIN,
+    ]);
+
+    if (response) {
+      return response;
+    }
+
     const { id } = await params;
     const body = await request.json();
 
     const { startTime, status, reason } = body;
 
-    const existingAppointment = await prisma.appointment.findUnique({
-      where: { id },
+    // Step 2: Verify doctor profile
+    if (user.role === UserRole.DOCTOR && !user.doctorProfile) {
+      return NextResponse.json(
+        { message: "Doctor profile not found." },
+        { status: 403 }
+      );
+    }
+
+    // Step 3: Retrieve appointment with ownership conditions
+    const where =
+      user.role === UserRole.PATIENT
+        ? { id, patientId: user.id }
+        : user.role === UserRole.DOCTOR
+          ? { id, doctorId: user.doctorProfile!.id }
+          : { id };
+
+    const existingAppointment = await prisma.appointment.findFirst({
+      where,
       include: {
         doctor: {
           select: {
@@ -75,21 +134,18 @@ export async function PATCH(
       );
     }
 
-    if (existingAppointment.status === "COMPLETED") {
+    // Step 4: Prevent updates to final appointments
+    if (
+      existingAppointment.status === "COMPLETED" ||
+      existingAppointment.status === "CANCELLED"
+    ) {
       return NextResponse.json(
-        { message: "A completed appointment cannot be updated." },
+        { message: "This appointment can no longer be updated." },
         { status: 400 }
       );
     }
 
-    if (existingAppointment.status === "CANCELLED") {
-      return NextResponse.json(
-        { message: "A cancelled appointment cannot be updated." },
-        { status: 400 }
-      );
-    }
-
-    // Validate the requested status
+    // Step 5: Validate requested status
     if (
       status !== undefined &&
       !Object.values(AppointmentStatus).includes(status)
@@ -100,28 +156,63 @@ export async function PATCH(
       );
     }
 
-    // Determine the new start time
-    let start = existingAppointment.startTime;
+    // Step 6: Enforce role-specific permissions
+    if (status !== undefined) {
+      const allowedStatuses: Record<string, string[]> = {
+        PATIENT: ["CANCELLED"],
+        DOCTOR: ["CONFIRMED", "CANCELLED", "COMPLETED"],
+        ADMIN: ["CONFIRMED", "CANCELLED", "COMPLETED"],
+      };
 
-    if (startTime !== undefined) {
-      start = new Date(startTime);
-
-      if (Number.isNaN(start.getTime())) {
+      if (!allowedStatuses[user.role].includes(status)) {
         return NextResponse.json(
-          { message: "Please provide a valid startTime." },
-          { status: 400 }
+          { message: "You are not permitted to perform this status change." },
+          { status: 403 }
         );
       }
 
-      if (start <= new Date()) {
+      // Enforce valid status transitions
+      const validTransitions: Record<string, string[]> = {
+        PENDING: ["CONFIRMED", "CANCELLED"],
+        CONFIRMED: ["CANCELLED", "COMPLETED"],
+      };
+
+      if (!validTransitions[existingAppointment.status].includes(status)) {
         return NextResponse.json(
-          { message: "The appointment must be scheduled in the future." },
+          { message: "This status transition is not allowed." },
           { status: 400 }
         );
       }
     }
 
-    // Recalculate end time if the appointment is rescheduled
+    // Step 7: Determine new start time
+    let start = existingAppointment.startTime;
+
+    if (startTime !== undefined) {
+      if (
+        user.role === UserRole.DOCTOR ||
+        user.role === UserRole.ADMIN ||
+        user.role === UserRole.PATIENT
+      ) {
+        start = new Date(startTime);
+
+        if (Number.isNaN(start.getTime())) {
+          return NextResponse.json(
+            { message: "Please provide a valid startTime." },
+            { status: 400 }
+          );
+        }
+
+        if (start <= new Date()) {
+          return NextResponse.json(
+            { message: "The appointment must be scheduled in the future." },
+            { status: 400 }
+          );
+        }
+      }
+    }
+
+    // Step 8: Calculate appointment end time
     const end =
       startTime !== undefined
         ? new Date(
@@ -132,7 +223,7 @@ export async function PATCH(
           )
         : existingAppointment.endTime;
 
-    // Check conflicts when rescheduling
+    // Step 9: Check appointment conflicts when rescheduling
     if (startTime !== undefined) {
       const conflict = await prisma.appointment.findFirst({
         where: {
@@ -153,6 +244,7 @@ export async function PATCH(
       }
     }
 
+    // Step 10: Update only explicitly permitted fields
     const updatedAppointment = await prisma.appointment.update({
       where: { id },
       data: {
@@ -166,6 +258,7 @@ export async function PATCH(
     });
 
     return NextResponse.json(updatedAppointment, { status: 200 });
+
   } catch (error) {
     console.error("Error updating appointment:", error);
 
@@ -176,17 +269,31 @@ export async function PATCH(
   }
 }
 
-// DELETE: Delete an appointment
+
+ // DELETE: Permanently delete an appointment (Admin only)
 export async function DELETE(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    // Step 1: Authenticate and authorize administrator
+    const { user, response } = await requireRole([
+      UserRole.ADMIN,
+    ]);
+
+    if (response) {
+      return response;
+    }
+
     const { id } = await params;
 
+    // Step 2: Find the appointment
     const appointment = await prisma.appointment.findUnique({
       where: { id },
-      select: { id: true, status: true },
+      select: {
+        id: true,
+        status: true,
+      },
     });
 
     if (!appointment) {
@@ -196,6 +303,7 @@ export async function DELETE(
       );
     }
 
+    // Step 3: Prevent deletion of completed appointments
     if (appointment.status === "COMPLETED") {
       return NextResponse.json(
         { message: "Completed appointments cannot be deleted." },
@@ -203,6 +311,7 @@ export async function DELETE(
       );
     }
 
+    // Step 4: Permanently delete the appointment
     await prisma.appointment.delete({
       where: { id },
     });
@@ -211,6 +320,7 @@ export async function DELETE(
       { message: "Appointment deleted successfully." },
       { status: 200 }
     );
+
   } catch (error) {
     console.error("Error deleting appointment:", error);
 
@@ -220,3 +330,4 @@ export async function DELETE(
     );
   }
 }
+

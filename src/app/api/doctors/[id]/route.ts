@@ -1,6 +1,8 @@
 
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { requireRole } from "@/lib/authorization";
+import { UserRole } from "@/generated/prisma/client";
 
 type RouteContext = {
   params: Promise<{ id: string }>;
@@ -14,18 +16,34 @@ export async function GET(
   _request: Request,
   { params }: RouteContext
 ) {
-  const { id } = await params;
-
-  if (!isValidUUID(id)) {
-    return NextResponse.json(
-      { message: "Invalid doctor ID" },
-      { status: 400 }
-    );
-  }
-
   try {
-    const doctor = await prisma.doctor.findUnique({
-      where: { id },
+    const { response } = await requireRole([
+      UserRole.PATIENT,
+      UserRole.DOCTOR,
+      UserRole.ADMIN,
+    ]);
+
+    if (response) {
+      return response;
+    }
+
+    const { id } = await params;
+
+    if (!isValidUUID(id)) {
+      return NextResponse.json(
+        { message: "Invalid doctor ID." },
+        { status: 400 }
+      );
+    }
+
+    const doctor = await prisma.doctor.findFirst({
+      where: {
+        id,
+        user: {
+          isActive: true,
+          role: UserRole.DOCTOR,
+        },
+      },
       include: {
         user: {
           select: { fullName: true },
@@ -38,7 +56,7 @@ export async function GET(
 
     if (!doctor) {
       return NextResponse.json(
-        { message: "Doctor not found" },
+        { message: "Doctor not found." },
         { status: 404 }
       );
     }
@@ -48,7 +66,7 @@ export async function GET(
     console.error("Error fetching doctor:", error);
 
     return NextResponse.json(
-      { message: "Failed to fetch doctor" },
+      { message: "Failed to fetch doctor." },
       { status: 500 }
     );
   }
@@ -59,16 +77,36 @@ export async function PATCH(
   request: Request,
   { params }: RouteContext
 ) {
-  const { id } = await params;
-
-  if (!isValidUUID(id)) {
-    return NextResponse.json(
-      { message: "Invalid doctor ID" },
-      { status: 400 }
-    );
-  }
-
   try {
+    const { user, response } = await requireRole([
+      UserRole.DOCTOR,
+      UserRole.ADMIN,
+    ]);
+
+    if (response) {
+      return response;
+    }
+
+    const { id } = await params;
+
+    if (!isValidUUID(id)) {
+      return NextResponse.json(
+        { message: "Invalid doctor ID." },
+        { status: 400 }
+      );
+    }
+
+    // Doctors can only update their own profile
+    if (
+      user.role === UserRole.DOCTOR &&
+      user.doctorProfile?.id !== id
+    ) {
+      return NextResponse.json(
+        { message: "You can only update your own doctor profile." },
+        { status: 403 }
+      );
+    }
+
     const body: unknown = await request.json();
 
     if (
@@ -77,12 +115,26 @@ export async function PATCH(
       Array.isArray(body)
     ) {
       return NextResponse.json(
-        { message: "Request body must be a JSON object" },
+        { message: "Request body must be a JSON object." },
         { status: 400 }
       );
     }
 
     const data = body as Record<string, unknown>;
+
+    // Doctors are only allowed to update their biography
+    if (
+      user.role === UserRole.DOCTOR &&
+      Object.keys(data).some((key) => key !== "bio")
+    ) {
+      return NextResponse.json(
+        {
+          message:
+            "Doctors can only update their own biography. Contact an administrator to change other profile details.",
+        },
+        { status: 403 }
+      );
+    }
 
     const updateData: {
       departmentId?: string;
@@ -97,7 +149,7 @@ export async function PATCH(
         !isValidUUID(data.departmentId)
       ) {
         return NextResponse.json(
-          { message: "A valid departmentId is required" },
+          { message: "A valid departmentId is required." },
           { status: 400 }
         );
       }
@@ -111,7 +163,7 @@ export async function PATCH(
         typeof data.licenseNumber !== "string"
       ) {
         return NextResponse.json(
-          { message: "License number must be text or null" },
+          { message: "License number must be text or null." },
           { status: 400 }
         );
       }
@@ -125,7 +177,7 @@ export async function PATCH(
     if ("bio" in data) {
       if (data.bio !== null && typeof data.bio !== "string") {
         return NextResponse.json(
-          { message: "Bio must be text or null" },
+          { message: "Bio must be text or null." },
           { status: 400 }
         );
       }
@@ -145,7 +197,10 @@ export async function PATCH(
         duration <= 0
       ) {
         return NextResponse.json(
-          { message: "Consultation duration must be a positive integer" },
+          {
+            message:
+              "Consultation duration must be a positive integer.",
+          },
           { status: 400 }
         );
       }
@@ -155,11 +210,12 @@ export async function PATCH(
 
     if (Object.keys(updateData).length === 0) {
       return NextResponse.json(
-        { message: "Provide at least one valid field to update" },
+        { message: "Provide at least one valid field to update." },
         { status: 400 }
       );
     }
 
+    // Verify the department exists if it is being changed
     if (updateData.departmentId) {
       const department = await prisma.department.findUnique({
         where: { id: updateData.departmentId },
@@ -168,7 +224,7 @@ export async function PATCH(
 
       if (!department) {
         return NextResponse.json(
-          { message: "Department not found" },
+          { message: "Department not found." },
           { status: 404 }
         );
       }
@@ -191,7 +247,7 @@ export async function PATCH(
   } catch (error) {
     if (error instanceof SyntaxError) {
       return NextResponse.json(
-        { message: "Invalid JSON request body" },
+        { message: "Invalid JSON request body." },
         { status: 400 }
       );
     }
@@ -199,14 +255,14 @@ export async function PATCH(
     if (error instanceof Error && "code" in error) {
       if (error.code === "P2025") {
         return NextResponse.json(
-          { message: "Doctor not found" },
+          { message: "Doctor not found." },
           { status: 404 }
         );
       }
 
       if (error.code === "P2002") {
         return NextResponse.json(
-          { message: "This license number is already in use" },
+          { message: "This license number is already in use." },
           { status: 409 }
         );
       }
@@ -215,27 +271,33 @@ export async function PATCH(
     console.error("Error updating doctor:", error);
 
     return NextResponse.json(
-      { message: "Failed to update doctor" },
+      { message: "Failed to update doctor." },
       { status: 500 }
     );
   }
 }
 
-// DELETE: Delete a doctor profile
+// DELETE: Delete a doctor profile (Admin only)
 export async function DELETE(
   _request: Request,
   { params }: RouteContext
 ) {
-  const { id } = await params;
-
-  if (!isValidUUID(id)) {
-    return NextResponse.json(
-      { message: "Invalid doctor ID" },
-      { status: 400 }
-    );
-  }
-
   try {
+    const { response } = await requireRole([UserRole.ADMIN]);
+
+    if (response) {
+      return response;
+    }
+
+    const { id } = await params;
+
+    if (!isValidUUID(id)) {
+      return NextResponse.json(
+        { message: "Invalid doctor ID." },
+        { status: 400 }
+      );
+    }
+
     await prisma.doctor.delete({
       where: { id },
     });
@@ -245,7 +307,7 @@ export async function DELETE(
     if (error instanceof Error && "code" in error) {
       if (error.code === "P2025") {
         return NextResponse.json(
-          { message: "Doctor not found" },
+          { message: "Doctor not found." },
           { status: 404 }
         );
       }
@@ -264,7 +326,7 @@ export async function DELETE(
     console.error("Error deleting doctor:", error);
 
     return NextResponse.json(
-      { message: "Failed to delete doctor" },
+      { message: "Failed to delete doctor." },
       { status: 500 }
     );
   }

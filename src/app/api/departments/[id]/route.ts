@@ -1,6 +1,8 @@
 
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { requireRole } from "@/lib/authorization";
+import { UserRole } from "@/generated/prisma/client";
 
 type RouteContext = {
   params: Promise<{ id: string }>;
@@ -14,23 +16,33 @@ export async function GET(
   _request: Request,
   { params }: RouteContext
 ) {
-  const { id } = await params;
-
-  if (!isValidUUID(id)) {
-    return NextResponse.json(
-      { message: "Invalid department ID" },
-      { status: 400 }
-    );
-  }
-
   try {
+    const { response } = await requireRole([
+      UserRole.PATIENT,
+      UserRole.DOCTOR,
+      UserRole.ADMIN,
+    ]);
+
+    if (response) {
+      return response;
+    }
+
+    const { id } = await params;
+
+    if (!isValidUUID(id)) {
+      return NextResponse.json(
+        { message: "Invalid department ID." },
+        { status: 400 }
+      );
+    }
+
     const department = await prisma.department.findUnique({
       where: { id },
     });
 
     if (!department) {
       return NextResponse.json(
-        { message: "Department not found" },
+        { message: "Department not found." },
         { status: 404 }
       );
     }
@@ -40,27 +52,33 @@ export async function GET(
     console.error("Error fetching department:", error);
 
     return NextResponse.json(
-      { message: "Failed to fetch department" },
+      { message: "Failed to fetch department." },
       { status: 500 }
     );
   }
 }
 
-// PATCH: Update an existing department
+// PATCH: Update a department (Admin only)
 export async function PATCH(
   request: Request,
   { params }: RouteContext
 ) {
-  const { id } = await params;
-
-  if (!isValidUUID(id)) {
-    return NextResponse.json(
-      { message: "Invalid department ID" },
-      { status: 400 }
-    );
-  }
-
   try {
+    const { response } = await requireRole([UserRole.ADMIN]);
+
+    if (response) {
+      return response;
+    }
+
+    const { id } = await params;
+
+    if (!isValidUUID(id)) {
+      return NextResponse.json(
+        { message: "Invalid department ID." },
+        { status: 400 }
+      );
+    }
+
     const body: unknown = await request.json();
 
     if (
@@ -69,12 +87,13 @@ export async function PATCH(
       Array.isArray(body)
     ) {
       return NextResponse.json(
-        { message: "Request body must be a JSON object" },
+        { message: "Request body must be a JSON object." },
         { status: 400 }
       );
     }
 
     const data = body as Record<string, unknown>;
+
     const updateData: {
       name?: string;
       description?: string | null;
@@ -86,7 +105,7 @@ export async function PATCH(
         !data.name.trim()
       ) {
         return NextResponse.json(
-          { message: "Department name must not be empty" },
+          { message: "Department name must not be empty." },
           { status: 400 }
         );
       }
@@ -100,20 +119,20 @@ export async function PATCH(
         typeof data.description !== "string"
       ) {
         return NextResponse.json(
-          { message: "Description must be text or null" },
+          { message: "Description must be text or null." },
           { status: 400 }
         );
       }
 
       updateData.description =
         typeof data.description === "string"
-          ? data.description.trim()
+          ? data.description.trim() || null
           : null;
     }
 
     if (Object.keys(updateData).length === 0) {
       return NextResponse.json(
-        { message: "Provide a name or description to update" },
+        { message: "Provide a name or description to update." },
         { status: 400 }
       );
     }
@@ -125,17 +144,27 @@ export async function PATCH(
 
     return NextResponse.json(department, { status: 200 });
   } catch (error) {
+    if (error instanceof SyntaxError) {
+      return NextResponse.json(
+        { message: "Invalid JSON request body." },
+        { status: 400 }
+      );
+    }
+
     if (error instanceof Error && "code" in error) {
       if (error.code === "P2025") {
         return NextResponse.json(
-          { message: "Department not found" },
+          { message: "Department not found." },
           { status: 404 }
         );
       }
 
       if (error.code === "P2002") {
         return NextResponse.json(
-          { message: "A department with this name already exists" },
+          {
+            message:
+              "A department with this name already exists.",
+          },
           { status: 409 }
         );
       }
@@ -144,27 +173,33 @@ export async function PATCH(
     console.error("Error updating department:", error);
 
     return NextResponse.json(
-      { message: "Failed to update department" },
+      { message: "Failed to update department." },
       { status: 500 }
     );
   }
 }
 
-// DELETE: Delete a department
+// DELETE: Delete a department (Admin only)
 export async function DELETE(
   _request: Request,
   { params }: RouteContext
 ) {
-  const { id } = await params;
-
-  if (!isValidUUID(id)) {
-    return NextResponse.json(
-      { message: "Invalid department ID" },
-      { status: 400 }
-    );
-  }
-
   try {
+    const { response } = await requireRole([UserRole.ADMIN]);
+
+    if (response) {
+      return response;
+    }
+
+    const { id } = await params;
+
+    if (!isValidUUID(id)) {
+      return NextResponse.json(
+        { message: "Invalid department ID." },
+        { status: 400 }
+      );
+    }
+
     await prisma.department.delete({
       where: { id },
     });
@@ -174,7 +209,7 @@ export async function DELETE(
     if (error instanceof Error && "code" in error) {
       if (error.code === "P2025") {
         return NextResponse.json(
-          { message: "Department not found" },
+          { message: "Department not found." },
           { status: 404 }
         );
       }
@@ -193,7 +228,7 @@ export async function DELETE(
     console.error("Error deleting department:", error);
 
     return NextResponse.json(
-      { message: "Failed to delete department" },
+      { message: "Failed to delete department." },
       { status: 500 }
     );
   }

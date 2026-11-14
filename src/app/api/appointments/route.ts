@@ -1,11 +1,44 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import prisma  from "@/lib/prisma";
+import { requireRole } from "@/lib/authorization";
+import { UserRole } from "@/generated/prisma/client";
 
 // GET: Retrieve all appointments
+
+// GET: Retrieve appointments according to the user's role
 export async function GET() {
   try {
+    // Step 1: Authenticate the user and check their role
+    const { user, response } = await requireRole([
+      UserRole.PATIENT,
+      UserRole.DOCTOR,
+      UserRole.ADMIN,
+    ]);
+
+    if (response) {
+      return response;
+    }
+
+    // Step 2: Ensure doctors have a doctor profile
+    if (user.role === UserRole.DOCTOR && !user.doctorProfile) {
+      return NextResponse.json(
+        { message: "Doctor profile not found." },
+        { status: 403 }
+      );
+    }
+
+    // Step 3: Apply role-specific appointment filtering
+    const where =
+      user.role === UserRole.PATIENT
+        ? { patientId: user.id }
+        : user.role === UserRole.DOCTOR
+          ? { doctorId: user.doctorProfile!.id }
+          : {};
+
+    // Step 4: Retrieve authorized appointments
     const appointments = await prisma.appointment.findMany({
+      where,
       include: {
         patient: {
           select: {
@@ -25,6 +58,7 @@ export async function GET() {
     });
 
     return NextResponse.json(appointments, { status: 200 });
+
   } catch (error) {
     console.error("Error fetching appointments:", error);
 
@@ -35,24 +69,46 @@ export async function GET() {
   }
 }
 
+
 // POST: Create a new appointment
 export async function POST(request: NextRequest) {
   try {
+    // Step 1: Authenticate and authorize the requester
+    const { user, response } = await requireRole([
+      UserRole.PATIENT,
+      UserRole.ADMIN,
+    ]);
+
+    if (response) {
+      return response;
+    }
+
+    // Step 2: Read request body
     const body = await request.json();
 
-    const { patientId, doctorId, startTime, reason } = body;
+    const { doctorId, startTime, reason } = body;
 
-    // Validate required fields
-    if (!patientId || !doctorId || !startTime) {
+    // Step 3: Validate required fields
+    if (!doctorId || !startTime) {
       return NextResponse.json(
-        {
-          message: "patientId, doctorId, and startTime are required.",
-        },
+        { message: "doctorId and startTime are required." },
         { status: 400 }
       );
     }
 
-    // Validate the appointment date
+    // Step 4: Determine the patient
+    // Patients use their own ID; admins can specify a patient ID.
+    const patientId =
+      user.role === UserRole.ADMIN ? body.patientId : user.id;
+
+    if (!patientId) {
+      return NextResponse.json(
+        { message: "patientId is required for administrators." },
+        { status: 400 }
+      );
+    }
+
+    // Step 5: Validate appointment date
     const start = new Date(startTime);
 
     if (Number.isNaN(start.getTime())) {
@@ -69,59 +125,74 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check that the patient exists and has the PATIENT role
-    const patient = await prisma.user.findUnique({
-      where: { id: patientId },
-      select: { id: true, role: true },
+    // Step 6: Verify patient exists and has the PATIENT role
+    const patient = await prisma.user.findFirst({
+      where: {
+        id: patientId,
+        role: UserRole.PATIENT,
+        isActive: true,
+      },
+      select: {
+        id: true,
+      },
     });
 
-    if (!patient || patient.role !== "PATIENT") {
+    if (!patient) {
       return NextResponse.json(
-        { message: "A valid patient account is required." },
+        { message: "A valid active patient account is required." },
         { status: 404 }
       );
     }
 
-    // Check that the doctor exists
-    const doctor = await prisma.doctor.findUnique({
-      where: { id: doctorId },
+    // Step 7: Verify doctor exists
+    const doctor = await prisma.doctor.findFirst({
+      where: {
+        id: doctorId,
+        user: {
+          isActive: true,
+          role: UserRole.DOCTOR,
+        },
+      },
       select: {
         id: true,
-        departmentId: true,
         consultationDurationMinutes: true,
       },
     });
 
     if (!doctor) {
       return NextResponse.json(
-        { message: "Doctor not found." },
+        { message: "Active doctor not found." },
         { status: 404 }
       );
     }
 
-    // Calculate the appointment end time
+    // Step 8: Calculate appointment end time
     const end = new Date(
       start.getTime() + doctor.consultationDurationMinutes * 60 * 1000
     );
 
-    // Check whether the doctor already has an overlapping appointment
+    // Step 9: Check for overlapping appointments
     const conflictingAppointment = await prisma.appointment.findFirst({
       where: {
         doctorId: doctor.id,
         startTime: { lt: end },
         endTime: { gt: start },
       },
-      select: { id: true },
+      select: {
+        id: true,
+      },
     });
 
     if (conflictingAppointment) {
       return NextResponse.json(
-        { message: "The doctor already has an appointment during that time." },
+        {
+          message: "The doctor already has an appointment during that time.",
+        },
         { status: 409 }
       );
     }
 
-    // Save the appointment
+    // Step 10: Create appointment
     const appointment = await prisma.appointment.create({
       data: {
         patientId: patient.id,
@@ -133,6 +204,7 @@ export async function POST(request: NextRequest) {
     });
 
     return NextResponse.json(appointment, { status: 201 });
+
   } catch (error) {
     console.error("Error creating appointment:", error);
 
@@ -142,3 +214,4 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+
