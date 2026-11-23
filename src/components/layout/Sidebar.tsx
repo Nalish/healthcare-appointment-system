@@ -14,13 +14,14 @@ const navigationByRole: Record<
   UserRole,
   { label: string; href: string }[]
 > = {
-  PATIENT: [
-    { label: "Overview", href: "/dashboard" },
-    { label: "My Appointments", href: "/appointments" },
-    { label: "Find Doctors", href: "/doctors" },
-    { label: "Departments", href: "/departments" },
-    { label: "Notifications", href: "/notifications" },
-  ],
+PATIENT: [
+  { label: "Overview", href: "/dashboard" },
+  { label: "Book Appointment", href: "/dashboard/appointments/book" },
+  { label: "My Appointments", href: "/dashboard/appointments" },
+  { label: "Find Doctors", href: "/dashboard/doctors" },
+  { label: "Departments", href: "/dashboard/departments" },
+  { label: "Notifications", href: "/dashboard/notifications" },
+],
 
   DOCTOR: [
     { label: "Overview", href: "/dashboard" },

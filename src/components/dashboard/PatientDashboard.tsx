@@ -66,11 +66,18 @@ export default function PatientDashboard() {
   // Calculate appointment statistics
   const now = new Date();
 
-  const upcomingAppointments = appointments.filter(
-    (appointment) =>
-      new Date(appointment.startTime) > now &&
-      appointment.status !== "CANCELLED"
-  );
+  const upcomingAppointments = appointments
+    .filter(
+      (appointment) =>
+        new Date(appointment.startTime) > now &&
+        appointment.status !== "CANCELLED" &&
+        appointment.status !== "COMPLETED"
+    )
+    .sort(
+      (a, b) =>
+        new Date(a.startTime).getTime() -
+        new Date(b.startTime).getTime()
+    );
 
   const pendingAppointments = appointments.filter(
     (appointment) => appointment.status === "PENDING"
@@ -98,6 +105,25 @@ export default function PatientDashboard() {
       minute: "2-digit",
       hour12: true,
     }).format(new Date(date));
+  }
+
+  function getStatusStyles(status: AppointmentStatus) {
+    switch (status) {
+      case "CONFIRMED":
+        return "bg-green-100 text-green-700";
+
+      case "PENDING":
+        return "bg-yellow-100 text-yellow-700";
+
+      case "CANCELLED":
+        return "bg-red-100 text-red-700";
+
+      case "COMPLETED":
+        return "bg-gray-100 text-gray-700";
+
+      default:
+        return "bg-gray-100 text-gray-700";
+    }
   }
 
   return (
@@ -214,7 +240,13 @@ export default function PatientDashboard() {
                     </td>
 
                     <td className="px-6 py-4">
-                      {appointment.status}
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-medium ${getStatusStyles(
+                          appointment.status
+                        )}`}
+                      >
+                        {appointment.status}
+                      </span>
                     </td>
                   </tr>
                 ))}
